@@ -32,8 +32,8 @@ network:
   ethernets:
     eth0:
       dhcp4: false
-      addresses: [192.168.1.10/24]
-      gateway4: 192.168.1.1
+      addresses: [192.168.184.140/24]
+      gateway4: 192.168.184.1
       nameservers:
         addresses: [8.8.8.8, 8.8.4.4]
 ```
@@ -67,9 +67,9 @@ sudo nano /etc/hosts
 **添加hosts条目:**
 ```bash
 127.0.0.1       localhost
-192.168.1.10    devops-cicd
-192.168.1.11    devops-app
-192.168.1.12    devops-monitor
+192.168.184.140    devops-cicd
+192.168.184.141    devops-app
+192.168.184.142    devops-monitor
 
 # 保存退出 (Ctrl+X, Y, Enter)
 ```
@@ -150,10 +150,10 @@ docker run hello-world
 
 ## 第三步：安装Java和Jenkins
 
-### 3.1 安装Java 11
+### 3.1 安装Java 17 or above
 ```bash
-# 安装OpenJDK 11
-sudo apt install -y openjdk-11-jdk
+# 安装OpenJDK 17
+sudo apt install openjdk-17-jdk -y
 
 # 验证Java安装
 java -version
@@ -163,7 +163,7 @@ javac -version
 update-java-alternatives --list
 ```
 
-### 3.2 安装Jenkins
+### 3.2 安装Jenkins (注意端口分配)
 ```bash
 # 添加Jenkins仓库密钥
 curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo tee \
@@ -181,7 +181,7 @@ sudo apt-get update
 sudo apt-get install -y jenkins
 ```
 
-### 3.3 启动和配置Jenkins
+### 3.3 启动和配置Jenkins(需要java17或以上的版本，不支持java11)
 ```bash
 # 启动Jenkins服务
 sudo systemctl start jenkins
@@ -206,6 +206,10 @@ sudo nano /etc/default/jenkins
 
 # 找到HTTP_PORT行，确保是8080
 # HTTP_PORT=8080
+
+# 为支持子路径访问，添加Jenkins参数
+# 在JENKINS_ARGS行添加 --prefix=/jenkins
+# JENKINS_ARGS="--webroot=/var/cache/$NAME/war --httpPort=$HTTP_PORT --prefix=/jenkins"
 
 # 重启Jenkins
 sudo systemctl restart jenkins
@@ -234,16 +238,22 @@ curl https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.de
 sudo apt update
 ```
 
-### 4.3 安装GitLab CE
+### 4.3 安装GitLab CE 
 ```bash
-# 安装GitLab CE（指定外部URL）
-sudo EXTERNAL_URL="http://192.168.1.10" apt-get install gitlab-ce
+# 安装GitLab CE（指定外部URL和端口）
+sudo EXTERNAL_URL="http://192.168.184.140:8090" apt-get install gitlab-ce
 
 # 等待安装完成（可能需要5-10分钟）
 ```
 
 ### 4.4 配置GitLab
 ```bash
+# 如果需要修改端口配置，编辑GitLab配置文件
+sudo nano /etc/gitlab/gitlab.rb
+
+# 确保external_url已经配置在 /etc/gitlab/gitlab.rb
+# external_url 'http://192.168.184.140:8090'
+
 # 重新配置GitLab
 sudo gitlab-ctl reconfigure
 
@@ -252,17 +262,17 @@ sudo gitlab-ctl status
 
 # 重置root用户密码
 sudo gitlab-rake "gitlab:password:reset[root]"
-# 输入新密码: gitlab123
-# 再次输入确认: gitlab123
+# 输入新密码: Gitlab@123!
+# 再次输入确认: Gitlab@123!
 ```
 
-### 4.5 验证GitLab安装
+### 4.5 验证GitLab安装 (注意端口分配)
 ```bash
 # 检查GitLab服务端口
-sudo netstat -tlnp | grep :80
+sudo netstat -tlnp | grep :8090
 
 # 测试GitLab访问
-curl -I http://localhost
+curl -I http://localhost:8090
 ```
 
 ## 第五步：安装和配置Nginx
@@ -278,6 +288,11 @@ sudo systemctl enable nginx
 
 # 检查Nginx状态
 sudo systemctl status nginx
+sudo gitlab-ctl stop nginx # gitlab可能造成nginx无法正常运行
+sudo systemctl start nginx
+sudo systemctl enable nginx
+sudo systemctl status nginx
+sudo gitlab-ctl start nginx
 ```
 
 ### 5.2 备份默认配置
@@ -303,9 +318,9 @@ server {
     
     server_name devops-cicd 192.168.1.10;
     
-    # GitLab - 主站点
+    # GitLab - 主站点（代理到8090端口）
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:8090;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -321,9 +336,9 @@ server {
         proxy_set_header Connection "upgrade";
     }
     
-    # Jenkins - 子路径访问
-    location ^~ /jenkins {
-        proxy_pass http://127.0.0.1:8080;
+    # Jenkins - 子路径访问（代理到8080端口）
+    location ^~ /jenkins/ {
+        proxy_pass http://127.0.0.1:8080/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -331,24 +346,14 @@ server {
         
         # Jenkins需要的特殊头
         proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Forwarded-Prefix /jenkins;
         proxy_redirect default;
         proxy_buffering off;
-    }
-}
-
-# Jenkins专用服务器块
-server {
-    listen 8080;
-    server_name devops-cicd 192.168.1.10;
-    
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect default;
-        proxy_buffering off;
+        
+        # Jenkins WebSocket支持
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 ```
@@ -454,6 +459,9 @@ sudo ufw allow 80/tcp
 # 允许Jenkins直接访问
 sudo ufw allow 8080/tcp
 
+# 允许GitLab内部端口
+sudo ufw allow 8090/tcp
+
 # 允许Node Exporter
 sudo ufw allow 9100/tcp
 
@@ -490,12 +498,12 @@ nano ~/.ssh/config
 **SSH配置内容:**
 ```
 Host devops-app
-    HostName 192.168.1.11
+    HostName 192.168.184.141
     User ubuntu
     IdentityFile ~/.ssh/id_rsa
 
 Host devops-monitor
-    HostName 192.168.1.12
+    HostName 192.168.184.142
     User ubuntu
     IdentityFile ~/.ssh/id_rsa
 ```
@@ -517,7 +525,7 @@ sudo systemctl status node_exporter
 sudo systemctl status docker
 
 # 检查端口监听
-sudo netstat -tlnp | grep -E ':(80|8080|9100)'
+sudo netstat -tlnp | grep -E ':(80|8080|8090|9100)'
 ```
 
 ### 9.2 验证Docker功能
@@ -549,7 +557,7 @@ sudo ufw status
 # 获取Jenkins初始密码
 sudo cat /var/lib/jenkins/secrets/initialAdminPassword
 
-# 记录密码，然后访问: http://192.168.1.10:8080
+# 记录密码，然后访问: http://192.168.184.140/jenkins/ 或 http://192.168.184.140:8080
 ```
 
 **Jenkins Web初始化步骤:**
@@ -561,7 +569,7 @@ sudo cat /var/lib/jenkins/secrets/initialAdminPassword
    - 密码: jenkins123
    - 全名: Jenkins Admin
    - 邮箱: admin@devops-cicd
-5. 确认Jenkins URL: http://192.168.1.10:8080/
+5. 确认Jenkins URL: http://192.168.1.10/jenkins/ （如果通过子路径访问）或 http://192.168.1.10:8080/ （直接访问）
 6. 完成初始化
 
 ### 10.2 GitLab初始化
@@ -617,7 +625,7 @@ done
 
 echo ""
 echo "=== Port Status ==="
-netstat -tlnp | grep -E ':(80|8080|9100)' | awk '{print $4, $7}'
+netstat -tlnp | grep -E ':(80|8080|8090|9100)' | awk '{print $4, $7}'
 
 echo ""
 echo "=== Disk Usage ==="
@@ -635,31 +643,6 @@ sudo chmod +x /opt/check_services.sh
 # 运行检查脚本
 sudo /opt/check_services.sh
 ```
-
-## 完成验证清单
-
-**系统基础验证:**
-- [ ] 网络配置正确，可以ping通其他VM
-- [ ] SSH服务正常运行
-- [ ] 防火墙规则配置正确
-- [ ] 主机名和hosts配置正确
-
-**服务验证:**
-- [ ] Docker服务正常，可以运行容器
-- [ ] Jenkins可以通过Web界面访问
-- [ ] GitLab可以通过Web界面访问
-- [ ] Nginx反向代理工作正常
-- [ ] Node Exporter正常运行并暴露指标
-
-**连通性验证:**
-- [ ] 可以访问 http://192.168.1.10 (GitLab)
-- [ ] 可以访问 http://192.168.1.10:8080 (Jenkins)
-- [ ] 可以访问 http://192.168.1.10:9100/metrics (Node Exporter)
-
-**后续准备:**
-- [ ] SSH密钥已生成，准备复制到其他服务器
-- [ ] 服务配置文件已备份
-- [ ] 系统监控脚本已创建
 
 ## 故障排除指南
 
@@ -708,5 +691,32 @@ ip route show
 # 测试DNS
 nslookup google.com
 ```
+
+## 端口分配总结
+
+**最终端口分配方案:**
+- **HTTP访问 (80)**: Nginx反向代理前端
+- **GitLab内部 (8090)**: GitLab CE服务端口
+- **Jenkins (8080)**: Jenkins CI/CD服务端口  
+- **Node Exporter (9100)**: 系统指标监控
+- **SSH (22)**: 远程访问端口
+
+**访问方式:**
+- GitLab: `http://192.168.1.10/` (通过Nginx)
+- Jenkins: `http://192.168.1.10/jenkins/` (通过Nginx) 或 `http://192.168.1.10:8080` (直接)
+- 监控: `http://192.168.1.10:9100/metrics`
+
+**端口冲突解决方案:**
+1. GitLab从默认8080端口改为8090端口
+2. Jenkins保持8080端口不变
+3. Nginx配置正确的反向代理路径
+4. 防火墙规则包含所有必要端口
+5. Jenkins配置子路径支持(/jenkins)
+
+**重要配置文件:**
+- GitLab配置: `/etc/gitlab/gitlab.rb` 
+- Jenkins配置: `/etc/default/jenkins`
+- Nginx配置: `/etc/nginx/sites-available/default`
+- 防火墙规则: `sudo ufw status`
 
 VM1 CI/CD服务器配置完成！
